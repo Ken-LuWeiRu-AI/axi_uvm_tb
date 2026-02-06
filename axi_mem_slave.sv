@@ -26,6 +26,7 @@
 `ifndef _AXI_MEM_SLAVE_SV_
 `define _AXI_MEM_SLAVE_SV_
 import axi_common_pkg::*;
+
 module axi_mem_slave #(
   parameter logic [`AXI_ADDR_WIDTH-1:0] BASE_ADDR      = `AXI_DEFAULT_BASE_ADDR,
   parameter int unsigned                MEM_BYTES      = `AXI_DEFAULT_MEM_BYTES,
@@ -45,16 +46,16 @@ module axi_mem_slave #(
   // -------------------------
   input  logic [`AXI_ID_WIDTH-1:0]       AWID,
   input  logic [`AXI_ADDR_WIDTH-1:0]     AWADDR,
-  input  logic [7:0]                    AWLEN,
-  input  logic [2:0]                    AWSIZE,
+  input  logic [7:0]                     AWLEN,
+  input  logic [2:0]                     AWSIZE,
   input  axi_burst_e                     AWBURST,
-  input  logic                          AWLOCK,
-  input  logic [3:0]                    AWCACHE,
-  input  logic [2:0]                    AWPROT,
-  input  logic [3:0]                    AWQOS,
-  input  logic [3:0]                    AWREGION,
-  input  logic                          AWVALID,
-  output logic                          AWREADY,
+  input  logic                           AWLOCK,
+  input  logic [3:0]                     AWCACHE,
+  input  logic [2:0]                     AWPROT,
+  input  logic [3:0]                     AWQOS,
+  input  logic [3:0]                     AWREGION,
+  input  logic                           AWVALID,
+  output logic                           AWREADY,
 
   // -------------------------
   // W channel
@@ -181,6 +182,33 @@ module axi_mem_slave #(
   axi_resp_e                      w_range_resp;  // OKAY or DECERR based on addr range
 
   // -------------------------
+  // AW request FIFO (in-order)
+  // -------------------------
+  parameter int unsigned AWQ_DEPTH = 8;
+
+  typedef struct packed {
+    logic [`AXI_ID_WIDTH-1:0]       id;
+    logic [`AXI_ADDR_WIDTH-1:0]     addr;
+    logic [7:0]                     len;
+    logic [2:0]                     size;
+    axi_burst_e                     burst;
+    logic [15:0]                    bytes;      // bytes_per_beat
+    axi_resp_e                      base_resp;  // burst_supported_resp
+    axi_resp_e                      range_resp; // DECERR policy
+  } aw_req_t;
+
+  aw_req_t awq   [AWQ_DEPTH];
+  int unsigned awq_wptr, awq_rptr, awq_count;
+
+  function automatic bit awq_full();
+    return (awq_count >= AWQ_DEPTH);
+  endfunction
+
+  function automatic bit awq_empty();
+    return (awq_count == 0);
+  endfunction
+
+  // -------------------------
   // Read channel state
   // -------------------------
   typedef enum logic [1:0] {R_IDLE, R_WAIT, R_SEND} r_state_e;
@@ -199,14 +227,48 @@ module axi_mem_slave #(
   axi_resp_e                      r_base_resp;
   axi_resp_e                      r_range_resp;
 
+
+  // -------------------------
+  // AR request FIFO (in-order)
+  // -------------------------
+  parameter int unsigned ARQ_DEPTH = 8;
+
+  typedef struct packed {
+    logic [`AXI_ID_WIDTH-1:0]       id;
+    logic [`AXI_ADDR_WIDTH-1:0]     addr;
+    logic [7:0]                     len;
+    logic [2:0]                     size;
+    axi_burst_e                     burst;
+    logic [15:0]                    bytes;
+    axi_resp_e                      base_resp;
+    axi_resp_e                      range_resp;
+  } ar_req_t;
+
+  ar_req_t arq   [ARQ_DEPTH];
+  int unsigned arq_wptr, arq_rptr, arq_count;
+
+  function automatic bit arq_full();
+    return (arq_count >= ARQ_DEPTH);
+  endfunction
+
+  function automatic bit arq_empty();
+    return (arq_count == 0);
+  endfunction
+
   // -------------------------
   // Combinational READYs (simple)
   // -------------------------
   always_comb begin
-    AWREADY = (w_state == W_IDLE);
+    // allow enqueue multiple requests
+    AWREADY = !awq_full();
+    ARREADY = !arq_full();
+
+    // WREADY only when we are currently consuming an active write
     WREADY  = (w_state == W_DATA);
-    ARREADY = (r_state == R_IDLE);
+
+    // RVALID is sequentially controlled; keep ARREADY separate
   end
+
 
   // -------------------------
   // Sequential logic
@@ -255,6 +317,16 @@ module axi_mem_slave #(
       RRESP         <= AXI_RESP_OKAY;
       RLAST         <= 1'b0;
       RVALID        <= 1'b0;
+
+
+      awq_wptr  <= 0;
+      awq_rptr  <= 0;
+      awq_count <= 0;
+
+      arq_wptr  <= 0;
+      arq_rptr  <= 0;
+      arq_count <= 0;
+
     end else begin
       // -------------------------
       // WRITE FSM
@@ -262,24 +334,46 @@ module axi_mem_slave #(
       case (w_state)
         W_IDLE: begin
           BVALID <= 1'b0;
+
+          // enqueue AW whenever handshake and FIFO has room
           if (AWVALID && AWREADY) begin
-            awid_q        <= AWID;
-            awaddr_q      <= AWADDR;
-            awlen_q       <= AWLEN;
-            awsize_q      <= AWSIZE;
-            awburst_q     <= AWBURST;
+            aw_req_t tmp;
+            tmp.id        = AWID;
+            tmp.addr      = AWADDR;
+            tmp.len       = AWLEN;
+            tmp.size      = AWSIZE;
+            tmp.burst     = AWBURST;
+            tmp.bytes     = bytes_per_beat(AWSIZE);
+            tmp.base_resp = burst_supported_resp(AWBURST);
+            tmp.range_resp= (CHECK_ADDR && !addr_in_range(AWADDR)) ? AXI_RESP_DECERR : AXI_RESP_OKAY;
 
-            w_beats_total <= int'(AWLEN) + 1;
+            awq[awq_wptr] <= tmp;
+            awq_wptr      <= (awq_wptr + 1) % AWQ_DEPTH;
+            awq_count     <= awq_count + 1;
+          end
+
+          // if no active write and we have queued AW, pop one and start consuming W
+          if (!awq_empty()) begin
+            aw_req_t cur;
+            cur = awq[awq_rptr];
+
+            // pop
+            awq_rptr  <= (awq_rptr + 1) % AWQ_DEPTH;
+            awq_count <= awq_count - 1;
+
+            // load into your original "aw*_q" regs
+            awid_q        <= cur.id;
+            awaddr_q      <= cur.addr;
+            awlen_q       <= cur.len;
+            awsize_q      <= cur.size;
+            awburst_q     <= cur.burst;
+
+            w_beats_total <= int'(cur.len) + 1;
             w_beat_idx    <= 0;
-            w_bytes       <= bytes_per_beat(AWSIZE);
+            w_bytes       <= cur.bytes;
 
-            w_base_resp   <= burst_supported_resp(AWBURST);
-
-            // Range check policy:
-            // - if any accessed byte is out of range => DECERR
-            // For simplicity we only check the first address here and let per-byte
-            // writes silently drop out-of-range bytes; TB can tighten later.
-            w_range_resp  <= (CHECK_ADDR && !addr_in_range(AWADDR)) ? AXI_RESP_DECERR : AXI_RESP_OKAY;
+            w_base_resp   <= cur.base_resp;
+            w_range_resp  <= cur.range_resp;
 
             w_state       <= W_DATA;
           end
@@ -341,24 +435,49 @@ module axi_mem_slave #(
           RVALID <= 1'b0;
           RLAST  <= 1'b0;
 
+          // enqueue AR
           if (ARVALID && ARREADY) begin
-            arid_q        <= ARID;
-            araddr_q      <= ARADDR;
-            arlen_q       <= ARLEN;
-            arsize_q      <= ARSIZE;
-            arburst_q     <= ARBURST;
+            ar_req_t tmp;
+            tmp.id        = ARID;
+            tmp.addr      = ARADDR;
+            tmp.len       = ARLEN;
+            tmp.size      = ARSIZE;
+            tmp.burst     = ARBURST;
+            tmp.bytes     = bytes_per_beat(ARSIZE);
+            tmp.base_resp = burst_supported_resp(ARBURST);
+            tmp.range_resp= (CHECK_ADDR && !addr_in_range(ARADDR)) ? AXI_RESP_DECERR : AXI_RESP_OKAY;
 
-            r_beats_total <= int'(ARLEN) + 1;
+            arq[arq_wptr] <= tmp;
+            arq_wptr      <= (arq_wptr + 1) % ARQ_DEPTH;
+            arq_count     <= arq_count + 1;
+          end
+
+          // if have queued AR, pop and start latency/send
+          if (!arq_empty()) begin
+            ar_req_t cur;
+            cur = arq[arq_rptr];
+
+            arq_rptr  <= (arq_rptr + 1) % ARQ_DEPTH;
+            arq_count <= arq_count - 1;
+
+            arid_q        <= cur.id;
+            araddr_q      <= cur.addr;
+            arlen_q       <= cur.len;
+            arsize_q      <= cur.size;
+            arburst_q     <= cur.burst;
+
+            r_beats_total <= int'(cur.len) + 1;
             r_beat_idx    <= 0;
-            r_bytes       <= bytes_per_beat(ARSIZE);
+            r_bytes       <= cur.bytes;
 
-            r_base_resp   <= burst_supported_resp(ARBURST);
-            r_range_resp  <= (CHECK_ADDR && !addr_in_range(ARADDR)) ? AXI_RESP_DECERR : AXI_RESP_OKAY;
+            r_base_resp   <= cur.base_resp;
+            r_range_resp  <= cur.range_resp;
 
             r_lat_cnt     <= 0;
             r_state       <= (RD_LATENCY == 0) ? R_SEND : R_WAIT;
           end
         end
+
 
         R_WAIT: begin
           if (r_lat_cnt + 1 >= RD_LATENCY) begin
@@ -369,9 +488,14 @@ module axi_mem_slave #(
         end
 
         R_SEND: begin
-          // Hold stable while RVALID && !RREADY (AXI rule)
+          bit is_last;
+          logic [`AXI_ADDR_WIDTH-1:0] beat_addr;
+
+          // 用 counter 判斷最後一拍，絕對不要用 RLAST reg 當判斷依據
+          is_last = (r_beat_idx + 1 >= r_beats_total);
+
+          // 只有在「要送新 beat」時才更新輸出（或上一拍握手了）
           if (!RVALID || (RVALID && RREADY)) begin
-            logic [`AXI_ADDR_WIDTH-1:0] beat_addr;
             beat_addr = araddr_q + (r_beat_idx * r_bytes);
 
             RID   <= arid_q;
@@ -381,20 +505,22 @@ module axi_mem_slave #(
             else if (r_range_resp != AXI_RESP_OKAY) RRESP <= r_range_resp;
             else                                    RRESP <= AXI_RESP_OKAY;
 
-            RLAST <= (r_beat_idx + 1 >= r_beats_total);
+            RLAST <= is_last;
             RVALID<= 1'b1;
           end
 
           if (RVALID && RREADY) begin
-            if (RLAST) begin
+            if (is_last) begin
               RVALID <= 1'b0;
               RLAST  <= 1'b0;
               r_state<= R_IDLE;
-            end else begin
+            end
+            else begin
               r_beat_idx <= r_beat_idx + 1;
             end
           end
         end
+
 
         default: r_state <= R_IDLE;
       endcase

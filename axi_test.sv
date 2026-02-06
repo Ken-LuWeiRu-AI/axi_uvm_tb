@@ -2,19 +2,17 @@
 // File    : axi_test.sv
 // Author  : ken, Lu Wei-Ru
 // Created : 2026-01-18
-// Brief   : UVM test that builds AXI4 environment, configures knobs (active mode,
-//           burst enable, outstanding enable, random backpressure), and runs a
-//           directed flow (write then read) followed by optional stress tests.
+// Brief   : AXI4 UVM test suite.
+//           - Builds axi_env and propagates common knobs via uvm_config_db
+//             (verbose, enable_cov, base_addr, mem_bytes, check_addr, check_all_beats).
+//           - Provides tests for M0/M1 bring-up:
+//               * axi_test        : single write then single read (same address)
+//               * axi_smoke_test  : multiple single write/read pairs across addresses
+//               * axi_burst_test  : burst write then burst read
+//               * axi_stress_test : randomized read/write + WSTRB stress
+//           - M2 (multi-outstanding / out-of-order) is NOT implemented (stub only).
+//             Current environment assumes single-outstanding and in-order responses.
 //------------------------------------------------------------------------------
-
-//------------------------------------------------------------------------------
-// File    : axi_test.sv
-// Author  : ken, Lu Wei-Ru
-// Created : 2026-01-18
-// Brief   : AXI4 UVM tests. Builds axi_env, configures knobs, and runs
-//           sequences (M0/M1/stress/M2 stub).
-//------------------------------------------------------------------------------
-//
 // Notes:
 // - Default top (axi_top.sv) runs: run_test("axi_test").
 // - You can override with: +UVM_TESTNAME=axi_smoke_test, axi_burst_test, ...
@@ -241,5 +239,40 @@ class axi_outstanding_test extends axi_test;
   endtask
 
 endclass : axi_outstanding_test
+//------------------------------------------------------------------------------
+// axi_outstanding_rand_test: real outstanding traffic generator (L2 bring-up)
+//------------------------------------------------------------------------------
+class axi_outstanding_rand_test extends axi_test;
+  `uvm_component_utils(axi_outstanding_rand_test)
+
+  function new(string name="axi_outstanding_rand_test", uvm_component parent=null);
+    super.new(name, parent);
+  endfunction
+
+  virtual task run_phase(uvm_phase phase);
+    axi_outstanding_rand_seq s;
+
+    phase.raise_objection(this);
+
+    // ✅ outstanding traffic: responses will lag behind requests
+    phase.phase_done.set_drain_time(this, 2000ns); // 先放大一點，之後再調
+
+    if (env.agent == null || env.agent.sequencer == null)
+      `uvm_fatal(get_type_name(), "No sequencer found (agent must be ACTIVE).")
+
+    s = axi_outstanding_rand_seq::type_id::create("s");
+    void'(s.randomize() with {
+      num_reqs   inside {[100:300]};
+      write_pct  inside {[40:60]};
+      fixed_size == 3'd2;
+      max_len    inside {[0:15]};
+    });
+
+    s.start(env.agent.sequencer);
+
+    phase.drop_objection(this);
+  endtask
+
+endclass : axi_outstanding_rand_test
 
 `endif // _AXI_TEST_SV_

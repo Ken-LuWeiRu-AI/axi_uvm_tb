@@ -3,6 +3,31 @@
 Run in EDA Playground (Questa-compatible):  
 https://www.edaplayground.com/x/pfw6
 
+run optional adding:
++UVM_TESTNAME=axi_outstanding_rand_test
+
+最少修改清單（你問的答案）
+
+只為了 L2（不等 response、但 response 仍 in-order）
+✅ axi_driver.sv
+✅ axi_sequences.sv
+✅ axi_test.sv
+（建議再加）✅ axi_monitor.sv、✅ axi_scoreboard.sv（若你要 robust）
+
+要做到 OOO（真正 out-of-order 回覆）
+✅ 上面全部
+✅ axi_mem_slave.sv
+✅ axi_monitor.sv + axi_scoreboard.sv（OOO match）
+xamples（你可以用這個里程碑順序比較不痛）
+
+L2-1：只改 axi_driver.sv → 確認不再觸發 valid_hold assertion
+
+L2-2：加 outstanding seq/test（axi_sequences.sv/axi_test.sv）→ 壓測
+
+L2-3：DUT 開 queue（axi_mem_slave.sv）→ 多筆進來但回覆仍依序
+
+L3：DUT 回覆亂序 + SB OOO match → 真正 OOO
+
 A **minimal-yet-scalable UVM verification environment** for a
 **memory-mapped AXI4 slave DUT**.
 

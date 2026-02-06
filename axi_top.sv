@@ -1,26 +1,37 @@
 //------------------------------------------------------------------------------
 // File    : axi_top.sv
 // Author  : ken, Lu Wei-Ru
-// Created : 2026-01-18
-// Brief   : Top-level AXI4 UVM testbench wrapper. Generates clock/reset,
-//           instantiates AXI interface + DUT, binds virtual interface to UVM
-//           components via uvm_config_db, then calls run_test().
-//------------------------------------------------------------------------------
+// Brief   : Top-level AXI4 UVM testbench wrapper (EDA Playground friendly)
 //
-// Notes:
-// - You must compile axi_if.sv and your axi_tb_pkg.sv before this file.
-// - Path strings in uvm_config_db must match your UVM hierarchy.
-//   (Adjust "uvm_test_top.env.agent.driver" etc. to your actual names.)
+// Key rules for stability:
+// - In EDA Playground (or when compile order is unknown), keep `include of packages.
+// - Do NOT wildcard-import axi_common_pkg in this top scope.
+// - Import only axi_tb_pkg for UVM test/env visibility.
 //------------------------------------------------------------------------------
 
 `timescale 1ns/1ps
 
-`include "uvm_macros.svh"    // UVM macros
-`include "axi_tb_pkg.sv"        // AXI package
-`include "axi_if.sv"
-import uvm_pkg::*;           // Import UVM package
-import axi_tb_pkg::*;               // Import user-defined package (AXI environment)
+// 1) Common types package (axi_common_pkg)
+//    NOTE: This file must be included/compiled exactly once (guarded by `ifndef).
+`include "axi_types.sv"
 
+// 2) UVM macros (ok to include here)
+`include "uvm_macros.svh"
+
+// 3) TB package (axi_tb_pkg)
+//    IMPORTANT: axi_tb_pkg.sv must NOT re-export axi_common_pkg types with typedef duplicates.
+`include "axi_tb_pkg.sv"
+
+// 4) Interface
+`include "axi_if.sv"
+
+// Import UVM + TB package into top scope (for run_test / test class visibility)
+import uvm_pkg::*;
+import axi_tb_pkg::*;
+
+//------------------------------------------------------------------------------
+// Top module
+//------------------------------------------------------------------------------
 module axi_top;
 
   // -------------------------
@@ -61,7 +72,6 @@ module axi_top;
     .ACLK    (ACLK),
     .ARESETn (ARESETn),
 
-    // AW
     .AWID     (axi_vif.AWID),
     .AWADDR   (axi_vif.AWADDR),
     .AWLEN    (axi_vif.AWLEN),
@@ -75,20 +85,17 @@ module axi_top;
     .AWVALID  (axi_vif.AWVALID),
     .AWREADY  (axi_vif.AWREADY),
 
-    // W
     .WDATA    (axi_vif.WDATA),
     .WSTRB    (axi_vif.WSTRB),
     .WLAST    (axi_vif.WLAST),
     .WVALID   (axi_vif.WVALID),
     .WREADY   (axi_vif.WREADY),
 
-    // B
     .BID      (axi_vif.BID),
     .BRESP    (axi_vif.BRESP),
     .BVALID   (axi_vif.BVALID),
     .BREADY   (axi_vif.BREADY),
 
-    // AR
     .ARID     (axi_vif.ARID),
     .ARADDR   (axi_vif.ARADDR),
     .ARLEN    (axi_vif.ARLEN),
@@ -102,7 +109,6 @@ module axi_top;
     .ARVALID  (axi_vif.ARVALID),
     .ARREADY  (axi_vif.ARREADY),
 
-    // R
     .RID      (axi_vif.RID),
     .RDATA    (axi_vif.RDATA),
     .RRESP    (axi_vif.RRESP),
@@ -115,17 +121,14 @@ module axi_top;
   // UVM config + run_test
   // -------------------------
   initial begin
-    // Driver uses MASTER modport
     uvm_config_db#(virtual axi_if.MASTER_MP)::set(
       null, "uvm_test_top.env.agent.driver", "vif", axi_vif
     );
 
-    // Monitor uses MON modport
     uvm_config_db#(virtual axi_if.MON_MP)::set(
       null, "uvm_test_top.env.agent.monitor", "vif", axi_vif
     );
 
-    // Default test name (or override with +UVM_TESTNAME=xxx)
     run_test("axi_test");
   end
 

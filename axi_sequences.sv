@@ -336,5 +336,115 @@ class axi_outstanding_seq extends axi_base_seq;
   endtask
 
 endclass : axi_outstanding_seq
+//------------------------------------------------------------------------------
+// axi_outstanding_rand_seq (L2-2 bring-up)
+// - Generate many reqs back-to-back (driver is no-wait + channel threads)
+// - Goal: create pressure / multiple in-flight, not true OOO return yet
+//------------------------------------------------------------------------------
+class axi_outstanding_rand_seq extends axi_base_seq;
+  `uvm_object_utils(axi_outstanding_rand_seq)
+
+  // knobs
+  rand int unsigned num_reqs;          // total requests
+  rand int unsigned write_pct;         // 0..100
+  rand logic [7:0]  max_len;           // max beats-1 (0..15)
+  rand logic [2:0]  fixed_size;        // default keep 4B
+  rand int unsigned id_max;            // id range: 0..id_max (bring-up suggest 0 or 3)
+  rand int unsigned addr_hot_pct;      // 0..100, use hot address occasionally
+
+  constraint c_knobs {
+    num_reqs     inside {[100:300]};
+    write_pct    inside {[40:60]};
+    max_len      inside {[0:15]};
+    fixed_size   == 3'd2;         // 4 bytes/beat on 32-bit bus
+    id_max       inside {[0:3]};  // bring-up: few IDs
+    addr_hot_pct inside {[0:50]};
+  }
+
+  function new(string name="axi_outstanding_rand_seq");
+    super.new(name);
+  endfunction
+
+  virtual task body();
+    logic [`AXI_ADDR_WIDTH-1:0] hot_addr;
+    int unsigned hot_nbytes;
+
+    hot_nbytes = bytes_from_size(fixed_size);
+    hot_addr   = pick_addr_aligned(hot_nbytes);
+
+    for (int unsigned k = 0; k < num_reqs; k++) begin
+      axi_seq_item tr;
+
+      bit do_write;
+      logic [7:0] len;
+      logic [2:0] size;
+      logic [`AXI_ID_WIDTH-1:0] id;
+      logic [`AXI_ADDR_WIDTH-1:0] addr;
+
+      int unsigned beats;
+      int unsigned nbytes;
+
+      do_write = ($urandom_range(0,99) < int'(write_pct));
+      size     = fixed_size;
+      len      = $urandom_range(0, int'(max_len));
+
+      beats = int'(len) + 1;
+      if (beats == 0) beats = 1;
+
+      // ID: bring-up uses small range (0..id_max)
+      id = $urandom_range(0, int'(id_max));
+
+      nbytes = bytes_from_size(size);
+
+      // address: sometimes reuse hot address to create hazards/locality
+      if ($urandom_range(0,99) < int'(addr_hot_pct))
+        addr = hot_addr;
+      else
+        addr = pick_addr_aligned(nbytes);
+
+      tr = axi_seq_item::type_id::create($sformatf("ooo_req_%0d", k));
+
+      start_item(tr);
+
+      tr.id    = id;
+      tr.addr  = addr;
+      tr.len   = len;
+      tr.size  = size;
+      tr.burst = AXI_BURST_INCR;
+
+      if (do_write) begin
+        tr.rw    = AXI_WRITE;
+
+        tr.wdata = new[beats];
+        tr.wstrb = new[beats];
+        tr.rdata = new[0];
+
+        foreach (tr.wdata[i]) tr.wdata[i] = $urandom();
+
+        // strobe: mostly full, sometimes random (avoid all-zero)
+        foreach (tr.wstrb[i]) begin
+          if ($urandom_range(0,9) < 8)
+            tr.wstrb[i] = {`AXI_STRB_WIDTH{1'b1}};
+          else begin
+            tr.wstrb[i] = $urandom();
+            if (tr.wstrb[i] == '0) tr.wstrb[i] = {`AXI_STRB_WIDTH{1'b1}};
+          end
+        end
+      end
+      else begin
+        tr.rw    = AXI_READ;
+
+        // L2 driver won't fill; monitor/SB must consume R-channel data
+        tr.rdata = new[beats];
+        tr.wdata = new[0];
+        tr.wstrb = new[0];
+      end
+
+      finish_item(tr);
+    end
+  endtask
+
+endclass : axi_outstanding_rand_seq
+
 
 `endif // _AXI_SEQUENCES_SV_
