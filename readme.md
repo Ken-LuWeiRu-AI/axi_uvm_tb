@@ -1,7 +1,7 @@
 # AXI4 UVM Verification Project (Out-of-Order Capable)
 
 Run in EDA Playground (Questa-compatible):  
-[[Link to your EDA Playground]](https://www.edaplayground.com/x/NYTP)
+[[Link to EDA Playground]](https://www.edaplayground.com/x/NYTP)
 
 Key Run Command for OOO Stress:
 ```sh
