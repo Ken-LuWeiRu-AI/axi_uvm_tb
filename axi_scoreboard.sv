@@ -1,3 +1,26 @@
+//------------------------------------------------------------------------------
+// File    : axi_scoreboard.sv
+// Author  : ken, Lu Wei-Ru
+// Created : 2026-02-08
+// Brief   : UVM AXI4 Scoreboard.
+//           A robust, OOO-capable scoreboard that verifies data integrity and
+//           transaction completeness for AXI4 master/slave environments.
+//
+//           Key Features:
+//           - Out-of-Order (OOO) Support: Uses associative arrays keyed by
+//             a unique tuple (ID + Tag) to track transactions regardless of
+//             completion order.
+//           - Split Transaction Tracking: Independently tracks Read and Write
+//             phases, ensuring that Address, Data, and Response phases match
+//             correctly even when interleaved.
+//           - Tag-Based Correlation: Relies on the Monitor's tagging system
+//             to uniquely identify specific transactions within the same ID group,
+//             solving the "ID reuse" ambiguity.
+//           - Data Integrity Verification: Performs byte-level comparison of
+//             Read Data (RDATA) and Write Data (WDATA) against the Reference Model.
+//           - Protocol Completeness: Detects missing beats, early terminations
+//             (premature WLAST/RLAST), and response mismatches (BRESP/RRESP).
+//------------------------------------------------------------------------------
 `ifndef _AXI_SCOREBOARD_SV_
 `define _AXI_SCOREBOARD_SV_
 
@@ -22,6 +45,9 @@ class axi_scoreboard extends uvm_component;
 
   // --------------------------------------------
   // Key = (id, tag)
+  // IMPORTANT:
+  //   tag in this project is per-ID sequencing tag,
+  //   so (id,tag) is the true unique key.
   // --------------------------------------------
   typedef struct packed {
     int unsigned id_key;
@@ -40,10 +66,10 @@ class axi_scoreboard extends uvm_component;
   // --------------------------------------------
   typedef struct {
     axi_seq_item exp;
-    int unsigned beat_idx;     // next expected beat
+    int unsigned beat_idx;      // next expected beat
     bit          active;
-    bit          ok_all;       // accumulate
-    bit          done_reported; // prevent double-report
+    bit          ok_all;        // accumulate
+    bit          done_reported; // prevent double-report (reserved)
   } rd_ctx_t;
 
   // --------------------------------------------
@@ -51,12 +77,12 @@ class axi_scoreboard extends uvm_component;
   // --------------------------------------------
   typedef struct {
     axi_seq_item exp;
-    int unsigned w_beat_idx;   // SB-owned beat counter (do NOT trust monitor beat_idx)
-    bit          have_wdata;   // got all beats (or saw WLAST)
-    bit          b_seen;       // BRESP arrived (maybe early)
-    axi_resp_e   b_resp_act;   // cached actual BRESP
+    int unsigned w_beat_idx;     // SB-owned beat counter (do NOT trust monitor beat_idx)
+    bit          have_wdata;     // got all beats (or saw WLAST)
+    bit          b_seen;         // BRESP arrived (maybe early)
+    axi_resp_e   b_resp_act;     // cached actual BRESP
     bit          active;
-    bit          done_reported;
+    bit          done_reported;  // prevent double-report (reserved)
   } wr_ctx_t;
 
   rd_ctx_t rd_pending[axi_key_t];
@@ -64,9 +90,6 @@ class axi_scoreboard extends uvm_component;
 
   // READ ignore to avoid flood after force-close (key -> remaining ignores)
   int unsigned rd_ignore_cnt[axi_key_t];
-
-  // WRITE mapping: tag -> key (W has no ID)
-  axi_key_t wr_key_by_tag[int unsigned];
 
   // --------------------------------------------
   // ctor/build/report
@@ -82,6 +105,7 @@ class axi_scoreboard extends uvm_component;
     if (!uvm_config_db#(axi_ref_model)::get(this, "", "rm", rm)) begin
       rm = axi_ref_model::type_id::create("rm", this);
     end
+    void'(uvm_config_db#(bit)::get(this, "", "verbose", verbose));
   endfunction
 
   function void report_phase(uvm_phase phase);
@@ -166,14 +190,13 @@ class axi_scoreboard extends uvm_component;
     if (req.rw == AXI_READ) begin
       rd_ctx_t ctx;
 
-      ctx.exp          = build_exp_from_req(req);
-      ctx.beat_idx     = 0;
-      ctx.active       = 1'b1;
-      ctx.ok_all       = 1'b1;
-      ctx.done_reported= 1'b0;
+      ctx.exp           = build_exp_from_req(req);
+      ctx.beat_idx      = 0;
+      ctx.active        = 1'b1;
+      ctx.ok_all        = 1'b1;
+      ctx.done_reported = 1'b0;
 
       rm.predict(ctx.exp);
-
       rd_pending[key] = ctx;
 
       if (verbose) begin
@@ -186,9 +209,12 @@ class axi_scoreboard extends uvm_component;
     else begin
       wr_ctx_t ctx;
 
-      // Detect tag reuse (very common source of chaos)
-      if (wr_key_by_tag.exists(req.tag)) begin
-        finalize_fail($sformatf("SB: tag reuse detected tag=%0d overwriting previous AW mapping", req.tag));
+      // If same (id,tag) appears again while active, that's a real collision
+      if (wr_pending.exists(key) && wr_pending[key].active) begin
+        finalize_fail($sformatf(
+          "SB: duplicate AW key detected id=0x%0h tag=%0d overwriting active context",
+          req.id, req.tag
+        ));
         // keep going; overwrite to avoid deadlock
       end
 
@@ -201,7 +227,6 @@ class axi_scoreboard extends uvm_component;
       ctx.done_reported = 1'b0;
 
       wr_pending[key] = ctx;
-      wr_key_by_tag[req.tag] = key;
 
       if (verbose) begin
         `uvm_info(get_type_name(),
@@ -219,7 +244,6 @@ class axi_scoreboard extends uvm_component;
     axi_key_t key;
     int unsigned id_key;
 
-    // READ key default: RID + tag
     id_key = int'(rsp.id);
     key    = mk_key(id_key, rsp.tag);
 
@@ -230,12 +254,10 @@ class axi_scoreboard extends uvm_component;
       rd_ctx_t ctx;
       bit this_ok;
 
-      // flood guard: after force-close, ignore some residual beats
       if (rd_should_ignore(key)) return;
 
       if (!rd_pending.exists(key) || !rd_pending[key].active) begin
         finalize_fail($sformatf("SB: unexpected R id=0x%0h tag=%0d (no pending)", rsp.id, rsp.tag));
-        // start ignore to avoid repeating if monitor keeps sending
         set_rd_ignore(key, 16);
         return;
       end
@@ -270,7 +292,6 @@ class axi_scoreboard extends uvm_component;
       ctx.ok_all &= this_ok;
       ctx.beat_idx++;
 
-      // RLAST early
       if (rsp.last && (ctx.beat_idx < ctx.exp.beats)) begin
         finalize_fail($sformatf(
           "SB: RLAST early id=0x%0h tag=%0d last_at_beat=%0d exp_last=%0d (force close)",
@@ -282,7 +303,6 @@ class axi_scoreboard extends uvm_component;
         return;
       end
 
-      // reached expected final beat
       if (ctx.beat_idx >= ctx.exp.beats) begin
         if (!rsp.last) begin
           finalize_fail($sformatf(
@@ -308,32 +328,25 @@ class axi_scoreboard extends uvm_component;
 
     // -----------------------
     // WRITE DATA beat (W)
-    // match by TAG only
+    // NOW: match by (id,tag) from monitor event
     // -----------------------
     if (rsp.kind == AXI_EVT_W) begin
       wr_ctx_t ctx;
-      axi_key_t wkey;
 
-      if (!wr_key_by_tag.exists(rsp.tag)) begin
-        finalize_fail($sformatf("SB: unexpected W tag=%0d (no AW mapping)", rsp.tag));
-        return;
-      end
-      wkey = wr_key_by_tag[rsp.tag];
-
-      if (!wr_pending.exists(wkey) || !wr_pending[wkey].active) begin
-        finalize_fail($sformatf("SB: unexpected W tag=%0d (no pending)", rsp.tag));
+      if (!wr_pending.exists(key) || !wr_pending[key].active) begin
+        finalize_fail($sformatf("SB: unexpected W id=0x%0h tag=%0d (no pending)", rsp.id, rsp.tag));
         return;
       end
 
-      ctx = wr_pending[wkey];
+      ctx = wr_pending[key];
 
-      // DO NOT trust rsp.beat_idx
       if (ctx.w_beat_idx >= ctx.exp.beats) begin
-        finalize_fail($sformatf("SB: W overflow tag=%0d w_beat_idx=%0d exp_beats=%0d (force close)",
-                                rsp.tag, ctx.w_beat_idx, ctx.exp.beats));
+        finalize_fail($sformatf(
+          "SB: W overflow id=0x%0h tag=%0d w_beat_idx=%0d exp_beats=%0d (force close)",
+          rsp.id, rsp.tag, ctx.w_beat_idx, ctx.exp.beats
+        ));
         ctx.active = 1'b0;
-        wr_pending[wkey] = ctx;
-        wr_key_by_tag.delete(rsp.tag);
+        wr_pending[key] = ctx;
         return;
       end
 
@@ -342,70 +355,59 @@ class axi_scoreboard extends uvm_component;
 
       ctx.w_beat_idx++;
 
-      // have_wdata policy: either collected all beats, or saw WLAST
       if (ctx.w_beat_idx >= ctx.exp.beats) ctx.have_wdata = 1'b1;
       if (rsp.last) ctx.have_wdata = 1'b1;
 
-      // If B arrived early, finalize now
       if (ctx.have_wdata && ctx.b_seen) begin
         rm.predict(ctx.exp);
         if (ctx.b_resp_act !== ctx.exp.resp) begin
-          finalize_fail($sformatf("SB: BRESP mismatch tag=%0d ACT=%0d EXP=%0d",
-                                  rsp.tag, ctx.b_resp_act, ctx.exp.resp));
+          finalize_fail($sformatf("SB: BRESP mismatch id=0x%0h tag=%0d ACT=%0d EXP=%0d",
+                                  rsp.id, rsp.tag, ctx.b_resp_act, ctx.exp.resp));
         end else begin
-          finalize_pass($sformatf("WRITE done tag=%0d resp=%0d", rsp.tag, ctx.b_resp_act));
+          finalize_pass($sformatf("WRITE done id=0x%0h tag=%0d resp=%0d",
+                                  rsp.id, rsp.tag, ctx.b_resp_act));
         end
         ctx.active = 1'b0;
-        wr_pending[wkey] = ctx;
-        wr_key_by_tag.delete(rsp.tag);
+        wr_pending[key] = ctx;
         return;
       end
 
-      wr_pending[wkey] = ctx;
+      wr_pending[key] = ctx;
       return;
     end
 
     // -----------------------
     // WRITE RESP (B)
-    // match by TAG only
+    // NOW: match by (id,tag) from monitor event
     // -----------------------
     if (rsp.kind == AXI_EVT_B) begin
       wr_ctx_t ctx;
-      axi_key_t bkey;
 
-      if (!wr_key_by_tag.exists(rsp.tag)) begin
-        finalize_fail($sformatf("SB: unexpected B tag=%0d (no AW mapping)", rsp.tag));
-        return;
-      end
-      bkey = wr_key_by_tag[rsp.tag];
-
-      if (!wr_pending.exists(bkey) || !wr_pending[bkey].active) begin
-        finalize_fail($sformatf("SB: unexpected B tag=%0d (no pending)", rsp.tag));
+      if (!wr_pending.exists(key) || !wr_pending[key].active) begin
+        finalize_fail($sformatf("SB: unexpected B id=0x%0h tag=%0d (no pending)", rsp.id, rsp.tag));
         return;
       end
 
-      ctx = wr_pending[bkey];
+      ctx = wr_pending[key];
 
-      // cache B (may be early)
       ctx.b_seen     = 1'b1;
       ctx.b_resp_act = rsp.resp;
 
       if (ctx.have_wdata) begin
         rm.predict(ctx.exp);
         if (ctx.b_resp_act !== ctx.exp.resp) begin
-          finalize_fail($sformatf("SB: BRESP mismatch tag=%0d ACT=%0d EXP=%0d",
-                                  rsp.tag, ctx.b_resp_act, ctx.exp.resp));
+          finalize_fail($sformatf("SB: BRESP mismatch id=0x%0h tag=%0d ACT=%0d EXP=%0d",
+                                  rsp.id, rsp.tag, ctx.b_resp_act, ctx.exp.resp));
         end else begin
-          finalize_pass($sformatf("WRITE done tag=%0d resp=%0d", rsp.tag, ctx.b_resp_act));
+          finalize_pass($sformatf("WRITE done id=0x%0h tag=%0d resp=%0d",
+                                  rsp.id, rsp.tag, ctx.b_resp_act));
         end
         ctx.active = 1'b0;
-        wr_pending[bkey] = ctx;
-        wr_key_by_tag.delete(rsp.tag);
+        wr_pending[key] = ctx;
         return;
       end
 
-      // wait W to complete
-      wr_pending[bkey] = ctx;
+      wr_pending[key] = ctx;
       return;
     end
   endfunction

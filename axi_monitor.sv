@@ -1,12 +1,12 @@
 //------------------------------------------------------------------------------
 // File    : axi_monitor.sv
-// Brief   : UVM AXI4 passive monitor (L2 outstanding-capable).
-//           - req_ap: AW/AR handshake events
-//           - rsp_ap: W beat events + B handshake + each R beat events
-// Notes   :
-//   - W channel has NO ID -> must attribute W beats by AW order (FIFO).
-//   - B has BID -> pop tag by BID from per-ID queue.
-//   - R has RID -> attribute by RID from per-ID read queue.
+// Author  : ken, Lu Wei-Ru
+// Created : 2026-02-08
+// Brief   : UVM AXI4 Passive Monitor.
+//           - Supports Multiple Outstanding transactions (L2).
+//           - Supports Out-of-Order (OOO) responses using per-ID queues.
+//           - Reconstructs high-level events (Req/Rsp) from bus signaling.
+//           - Validates fundamental AXI ordering rules (e.g. W must follow AW).
 //------------------------------------------------------------------------------
 
 `ifndef _AXI_MONITOR_SV_

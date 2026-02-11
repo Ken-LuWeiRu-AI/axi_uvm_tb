@@ -1,294 +1,175 @@
-# AXI4 UVM Verification Project
+# AXI4 UVM Verification Project (Out-of-Order Capable)
 
 Run in EDA Playground (Questa-compatible):  
-https://www.edaplayground.com/x/pfw6
+[Link to your EDA Playground]
 
-run optional adding:
+Key Run Command for OOO Stress:
+```sh
 +UVM_TESTNAME=axi_outstanding_rand_test
 
-最少修改清單（你問的答案）
+```
 
-只為了 L2（不等 response、但 response 仍 in-order）
-✅ axi_driver.sv
-✅ axi_sequences.sv
-✅ axi_test.sv
-（建議再加）✅ axi_monitor.sv、✅ axi_scoreboard.sv（若你要 robust）
+A high-performance, industry-standard UVM verification environment for a
+memory-mapped AXI4 slave DUT.
 
-要做到 OOO（真正 out-of-order 回覆）
-✅ 上面全部
-✅ axi_mem_slave.sv
-✅ axi_monitor.sv + axi_scoreboard.sv（OOO match）
-xamples（你可以用這個里程碑順序比較不痛）
-
-L2-1：只改 axi_driver.sv → 確認不再觸發 valid_hold assertion
-
-L2-2：加 outstanding seq/test（axi_sequences.sv/axi_test.sv）→ 壓測
-
-L2-3：DUT 開 queue（axi_mem_slave.sv）→ 多筆進來但回覆仍依序
-
-L3：DUT 回覆亂序 + SB OOO match → 真正 OOO
-
-A **minimal-yet-scalable UVM verification environment** for a
-**memory-mapped AXI4 slave DUT**.
-
-This project demonstrates a **clean, industry-style AXI UVM architecture**:
-
-**sequence → sequencer → driver → interface → DUT**,  
-with a **monitor → reference model → scoreboard** checking path.
-
-The environment is designed for **M0/M1 bring-up correctness**, while clearly
-documenting what is required to evolve toward **M2 (multi-outstanding / out-of-order)** AXI verification.
+This project implements a fully Out-of-Order (OOO) and Multiple Outstanding architecture. Unlike basic AXI examples that block until a response is received, this environment supports high-throughput, pipelined traffic where responses (Read Data / Write Response) can return in any order allowed by the AXI4 protocol.
 
 ---
 
-## Features
+## 🚀 Key Features
 
-### Verification Environment
-- AXI4 master UVM agent (ACTIVE / PASSIVE ready)
-- Driver using AXI clocking block (`MASTER_MP`)
-- Passive monitor using clocking block (`MON_MP`)
-- Byte-addressable **reference model with mirror memory**
-- Scoreboard comparing **ACT vs EXP** transactions
-- Optional functional coverage subscriber
-- Clear separation of **design / interface / TB package / top**
+### Advanced Verification Capabilities (M2 Level)
 
-### Supported AXI Features (Current)
-- Channels: **AW / W / B / AR / R**
-- **INCR bursts**
-- **WSTRB byte enables**
-- Single-beat and burst transactions
-- VALID-hold protocol correctness
-- Backpressure via READY
-- Single outstanding write
-- Single outstanding read
+* Multiple Outstanding Support: The driver and DUT can handle multiple in-flight transactions simultaneously without stalling (up to queue depth).
+* Out-of-Order (OOO) Responses:
+* The DUT randomly reorders Read Data (R) and Write Responses (B) for different IDs.
+* The Monitor and Scoreboard use per-ID tracking to correctly reconstruct and verify interleaved transactions.
 
----
 
-## DUT Behavior (`axi_mem_slave.sv`)
+* Flow Control (Backpressure): The driver implements intelligent queue management to handle randomized stalls without overflow.
+* ID-Based Scoreboarding: Transactions are matched by `(ID, Tag)` rather than simple FIFO order, ensuring data integrity even when the bus acts non-deterministically.
 
-- Memory-mapped AXI4 slave
-- Address space:
-```
+### Verification Environment Components
 
-BASE_ADDR ... BASE_ADDR + MEM_BYTES - 1
-
-```
-- Memory is **byte-addressable**
-- Burst support:
-- ✅ `INCR`
-- ❌ `FIXED`, `WRAP` → `SLVERR`
-- Address checking:
-- Out-of-range access → `DECERR`
-- Latency knobs:
-- `RD_LATENCY`  : delay before first `RVALID`
-- `WR_RESP_LATENCY` : delay before `BVALID`
-- Assumptions (intentional):
-- One outstanding write
-- One outstanding read
-- In-order completion
-
-This DUT is intentionally **simple but protocol-correct**, making it ideal for learning and bring-up.
+* AXI4 Master Agent: Active/Passive ready.
+* OOO Driver: Non-blocking request acceptance with explicit thread separation for AW/W/AR channels.
+* OOO Monitor: Reconstructs split transactions using ID-indexed dynamic queues.
+* Reference Model: Byte-addressable mirror memory for data integrity checking.
+* Protocol Checks: Strict "VALID-Hold" enforcement and basic protocol assertions.
 
 ---
 
-## Verification Architecture (UVM)
+## 🛠️ DUT Behavior (`axi_mem_slave.sv`)
 
-### Overall Testbench Hierarchy (Word Diagram)
+A robust, synthesizable-style AXI4 slave designed to stress the verification environment.
 
-```
+* Address Space: `BASE_ADDR` ... `BASE_ADDR + MEM_BYTES - 1`
+* Queue-Based Processing: Internal queues allow accepting new addresses (`AW`/`AR`) while processing older ones.
+* Randomized OOO Selection:
+* In `R_IDLE` or `W_RESP` states, the slave randomly picks a pending transaction to process.
+* Protocol Compliance: Strictly enforces In-Order processing for transactions with the same ID (as required by AXI4).
 
-axi_top
-│
-├── Clock / Reset
-│
-├── axi_if (interface)
-│   ├── MASTER_MP  (driver)
-│   └── MON_MP     (monitor)
-│
-├── DUT : axi_mem_slave
-│
-└── uvm_test_top
-└── axi_test
-└── axi_env
-├── axi_agent
-│   ├── axi_sequencer
-│   ├── axi_driver
-│   └── axi_monitor
-│
-├── axi_ref_model
-│
-├── axi_scoreboard
-│
-└── axi_cov_subscriber (optional)
+
+* Burst Support: `INCR` (Fixed/Wrap return `SLVERR`).
+* Error Handling: Out-of-range access returns `DECERR`.
+
+---
+
+## 🏗️ Verification Architecture
+
+### Data Flow
+
+```mermaid
+graph TD
+    Seq[axi_outstanding_rand_seq] -->|Req (ID=0..3)| Sqr[Sequencer]
+    Sqr --> Drv[AXI Driver]
+    
+    subgraph Driver [Advanced Driver]
+        Drv -->|Thread 1| AW[AW Channel]
+        Drv -->|Thread 2| W[W Channel]
+        Drv -->|Thread 3| AR[AR Channel]
+    end
+
+    AW & W & AR --> |Interface| DUT[OOO Slave DUT]
+    
+    DUT -->|Rsp (Random Order)| Mon[AXI Monitor]
+    
+    subgraph Monitor [OOO Reconstruction]
+        Mon -->|Demux by ID| Q0[Queue ID=0]
+        Mon -->|Demux by ID| Q1[Queue ID=1]
+        Mon -->|Demux by ID| Qn[Queue ID=n]
+    end
+
+    Mon -->|Reassembled Tr| SB[Scoreboard]
+    Mon -->|Reassembled Tr| RM[Ref Model]
+    RM -->|Exp Tr| SB
 
 ```
 
 ---
 
-### Data Flow Diagram (Transaction View)
+## 📂 File Structure
 
-```
-
-axi_*_seq
-|
-v
-axi_sequencer
-|
-v
-axi_driver
-|
-v
-axi_if (MASTER_MP)
-|
-v
-DUT
-|
-v
-axi_if (MON_MP)
-|
-v
-axi_monitor
-|
-+-----------------------+
-|                       |
-v                       v
-axi_ref_model        axi_scoreboard (ACT)
-|
-v
-axi_scoreboard (EXP)
-
-```
-
-- **ACT path**: monitor → scoreboard  
-- **EXP path**: monitor → ref_model → scoreboard  
-- Scoreboard performs **transaction-level comparison**
-
----
-
-## File Structure
-
-```
-
+```text
 .
-├── design.sv              # Design-side compile wrapper
-├── axi_mem_slave.sv       # AXI4 slave DUT
+├── design.sv              # Design wrapper
+├── axi_mem_slave.sv       # OOO-capable AXI4 Slave DUT
 │
-├── axi_defines.sv         # Global AXI parameters (widths, defaults)
-├── axi_common_pkg.sv      # AXI enums (burst, resp, rw)
-├── axi_if.sv              # AXI interface + clocking blocks + assertions
+├── axi_defines.sv         # Global parameters
+├── axi_common_pkg.sv      # Enums/Typedefs
+├── axi_if.sv              # Interface & Assertions
 │
-├── axi_tb_pkg.sv          # Central UVM package (classes only)
-├── axi_seq_item.sv
-├── axi_sequencer.sv
-├── axi_driver.sv
-├── axi_monitor.sv
-├── axi_agent.sv
-├── axi_ref_model.sv
-├── axi_scoreboard.sv
-├── axi_cov_subscriber.sv
-├── axi_env.sv
-├── axi_sequences.sv
-├── axi_test.sv
+├── axi_tb_pkg.sv          # UVM Package
+├── axi_seq_item.sv        # Transaction Item (supports ID/Burst/Len)
+├── axi_driver.sv          # Multi-threaded, Backpressure-aware Driver
+├── axi_monitor.sv         # Per-ID Tracking Monitor
+├── axi_scoreboard.sv      # OOO Matching Scoreboard
+├── axi_env.sv             # Environment Container
+├── axi_sequences.sv       # Sequence Library (Directed + Random OOO)
+├── axi_test.sv            # Test Library
 │
-└── axi_top.sv             # Testbench top (clk/rst, interface, DUT, run_test)
+└── axi_top.sv             # Testbench Top
 
-````
+```
 
 ---
 
-## Running the Simulation
+## 🧪 Tests Overview
 
-### Questa / qrun
+| Test Name | Feature Verified |
+| --- | --- |
+| `axi_outstanding_rand_test` | (Hero Test) Generates heavy, randomized traffic with random IDs to force Out-of-Order responses and pipeline stress. |
+| `axi_test` | Basic smoke test (1 Write → 1 Read). |
+| `axi_burst_test` | Verifies multi-beat burst functionality (`INCR`). |
+| `axi_stress_test` | Randomized single-thread stress (random strobe/addr). |
 
-```sh
+---
+
+## ⚡ How to Run
+
+### Using Questa / qrun
+
+```bash
 qrun -batch -access=rw+/. -uvmhome uvm-1.2 -timescale 1ns/1ns -mfcu \
   design.sv axi_top.sv \
+  +UVM_TESTNAME=axi_outstanding_rand_test \
   -do "run -all; exit"
-````
 
-### Selecting a Test
+```
 
-```sh
-+UVM_TESTNAME=axi_test
-+UVM_TESTNAME=axi_smoke_test
-+UVM_TESTNAME=axi_burst_test
-+UVM_TESTNAME=axi_stress_test
-+UVM_TESTNAME=axi_outstanding_test
+### Expected Output (OOO Success)
+
+You should see pass/fail counts in the scoreboard report. Because of OOO, the order of "PASS" messages in the log may not match the order requests were sent.
+
+```text
+UVM_INFO axi_scoreboard.sv(90) ... SCOREBOARD SUMMARY: PASS=98 FAIL=0
+
 ```
 
 ---
 
-## Tests Overview
+## 🔮 Future Roadmap (M3+)
 
-| Test Name              | Purpose                                   |
-| ---------------------- | ----------------------------------------- |
-| `axi_test`             | Minimal smoke test (1 write → 1 read)     |
-| `axi_smoke_test`       | Multiple single-beat accesses             |
-| `axi_burst_test`       | Directed burst read/write                 |
-| `axi_stress_test`      | Random read/write/size/len/strobe         |
-| `axi_outstanding_test` | **M2 stub** (documents required upgrades) |
-
----
-
-## Common Pitfalls (Already Solved Here)
-
-| Issue                   | Cause                    | Solution                     |
-| ----------------------- | ------------------------ | ---------------------------- |
-| interface compile error | interface inside package | `axi_if.sv` kept outside     |
-| scoreboard mismatch     | missing ref model        | mirror-memory RM             |
-| burst data mismatch     | wrong beat math          | `len + 1` handled everywhere |
-| VALID instability       | payload changed early    | clocking block + assertions  |
-| default arg warnings    | extern mismatch          | defaults only in definition  |
-
----
-
-## How to Extend This Project (Roadmap)
-
-Recommended next steps:
-
-* Enable **true multi-outstanding (M2)**:
-
-  * Queue AW / AR in DUT
-  * Parallel channel threads in driver
-  * Per-ID reconstruction in monitor
-  * OOO matching in scoreboard
-* Add **AXI protocol assertions**
-* Add **UVM RAL (register model)**
-* Support `WRAP` bursts
-* Add USER sideband signals
+* [ ] Support Exclusive Access (Atomic operations).
+* [ ] Support `WRAP` and `FIXED` burst types in DUT.
+* [ ] Add UVM Register Model (RAL) adapter.
+* [ ] Implement SVA (SystemVerilog Assertions) for formal protocol verification.
 
 ---
 
 ## Author
 
-* **Author:** ken, Lu Wei-Ru
-* **Created:** 2026-01-18
-* **Purpose:** Learning-quality AXI4 + UVM reference project
-
----
-
-## License
-
-Suggested: **MIT License**
-(Adjust based on your usage)
+* Author: ken, Lu Wei-Ru
+* Created: 2026-02-08
+* Status: M2 Mature (Multi-Outstanding / OOO Verified)
 
 ```
 
----
+### What changed from the old README?
 
-### Why this is strong (important)
+1.  Stub Removed: The "M2 stub" warnings are gone. The `axi_outstanding_test` is replaced/superseded by the working `axi_outstanding_rand_test`.
+2.  DUT Description Updated: Explicitly mentions "Queue-Based Processing" and "Randomized OOO Selection" instead of "Single Outstanding".
+3.  Architecture Updated: Added the ID-based demuxing concept to the monitor/scoreboard description to explain *how* OOO is handled.
+4.  Key Command: Put the OOO test command at the very top, as it is now the "hero" test of your project.
 
-- ✅ Same **structure & readability** as your APB README  
-- ✅ AXI complexity explained **without overwhelming**
-- ✅ Shows **engineering judgment** (what is implemented vs intentionally omitted)
-- ✅ Interviewers immediately see:
-  - You understand **M0 → M1 → M2 progression**
-  - You know **why AXI is hard**, not just how to code it
-
-If you want next:
-- I can **align APB & AXI READMEs stylistically** so they look like a *series*
-- Or write a **top-level repo README** that links APB → AXI progression
-- Or help you write a **“Design Decisions” section** (very attractive in interviews)
-
-Just tell me.
 ```

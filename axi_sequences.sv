@@ -1,19 +1,29 @@
 //------------------------------------------------------------------------------
 // File    : axi_sequences.sv
 // Author  : ken, Lu Wei-Ru
-// Created : 2026-01-18
-// Brief   : Collection of AXI4 sequences in a single file. Includes basic
-//           directed read/write sequences (M0), burst sequences (M1), and
-//           optional stress/outstanding sequences (M2).
+// Created : 2026-02-08
+// Brief   : AXI4 UVM Sequence Library.
+//           A comprehensive collection of directed and random sequences for
+//           verifying AXI4 master/slave interfaces.
 //
-// Sequence list (brief-aligned):
-// - axi_base_seq
-// - axi_single_write_seq
-// - axi_single_read_seq
-// - axi_burst_write_seq
-// - axi_burst_read_seq
-// - axi_stress_seq        (random len/size/addr/strb; stall is DUT/driver controlled)
-// - axi_outstanding_seq   (M2 stub; requires multi-outstanding support in DUT/driver/monitor/SB)
+//           Contents:
+//           - Base Class:
+//             - axi_base_seq: Common utilities for address alignment and sizing.
+//
+//           - Directed Sequences (M0 - Basic):
+//             - axi_single_write_seq: Single write transaction.
+//             - axi_single_read_seq: Single read transaction.
+//
+//           - Burst Sequences (M1 - Bursting):
+//             - axi_burst_write_seq: Fixed-range burst writes (4-16 beats).
+//             - axi_burst_read_seq: Fixed-range burst reads (4-16 beats).
+//
+//           - Stress Sequences (M2 - Advanced):
+//             - axi_stress_seq: Randomized mix of read/write with varied parameters.
+//             - axi_outstanding_seq: Stub for future stress testing (deprecated).
+//             - axi_outstanding_rand_seq: High-pressure sequence generating back-to-back
+//               requests to exercise Multiple Outstanding and Out-of-Order (OOO)
+//               capabilities.
 //------------------------------------------------------------------------------
 
 `ifndef _AXI_SEQUENCES_SV_

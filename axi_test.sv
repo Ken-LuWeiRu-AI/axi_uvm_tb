@@ -1,32 +1,29 @@
 //------------------------------------------------------------------------------
 // File    : axi_test.sv
 // Author  : ken, Lu Wei-Ru
-// Created : 2026-01-18
-// Brief   : AXI4 UVM test suite.
-//           - Builds axi_env and propagates common knobs via uvm_config_db
-//             (verbose, enable_cov, base_addr, mem_bytes, check_addr, check_all_beats).
-//           - Provides tests for M0/M1 bring-up:
-//               * axi_test        : single write then single read (same address)
-//               * axi_smoke_test  : multiple single write/read pairs across addresses
-//               * axi_burst_test  : burst write then burst read
-//               * axi_stress_test : randomized read/write + WSTRB stress
-//           - M2 (multi-outstanding / out-of-order) is NOT implemented (stub only).
-//             Current environment assumes single-outstanding and in-order responses.
-//------------------------------------------------------------------------------
-// Notes:
-// - Default top (axi_top.sv) runs: run_test("axi_test").
-// - You can override with: +UVM_TESTNAME=axi_smoke_test, axi_burst_test, ...
-// - This project assumes single-outstanding read and write (DUT/driver/monitor).
-// - This project currently targets M0/M1 bring-up:
-//     * Single outstanding write + single outstanding read
-//     * In-order responses
-// - M2 (multi-outstanding / out-of-order return) is NOT implemented yet.
-//   To enable true M2 testing, you must upgrade:
-//     1) DUT: accept multiple AW/AR and queue requests
-//     2) Driver: issue requests without waiting for B/R completion
-//     3) Monitor: reconstruct transactions per-ID (queues/maps)
-//     4) Scoreboard: robust OOO matching (by ID and/or tag), and RM consistency
-
+// Created : 2026-02-08
+// Brief   : AXI4 UVM Test Suite.
+//           A collection of UVM tests ranging from basic connectivity checks to
+//           advanced stress scenarios.
+//
+//           Included Tests:
+//           - axi_test (Base):
+//             - Performs M0 bring-up with a single write and read to the same address.
+//           - axi_smoke_test:
+//             - Validates basic read/write operations across multiple addresses.
+//           - axi_burst_test (M1):
+//             - Verifies burst functionality with multi-beat transactions.
+//           - axi_stress_test:
+//             - Applies randomized stress with mixed read/write traffic and
+//               varied strobe patterns.
+//           - axi_outstanding_rand_test (M2):
+//             - Generates high-throughput, back-to-back requests to exercise
+//               multiple outstanding transactions and out-of-order responses.
+//
+//           Environment Configuration:
+//           - Propagates key parameters (base_addr, memory size, coverage enable)
+//             from the test layer down to the environment and components via
+//             uvm_config_db.
 //------------------------------------------------------------------------------
 
 `ifndef _AXI_TEST_SV_
